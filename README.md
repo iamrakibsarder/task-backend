@@ -1,8 +1,8 @@
 # TaskX — backend
 
-The REST API for TaskX, written in Rust with Axum, SQLx and PostgreSQL. It stores clients, projects, tasks, invoices and expenses, enforces the billing rules, and saves timer screenshots.
+The REST API for TaskX, written in Rust with Axum, SQLx and PostgreSQL. It handles accounts and sign-in, stores clients, projects, tasks, invoices and expenses, enforces the billing rules, keeps an activity log, and saves timer screenshots.
 
-The frontend lives in a separate repo (`taskx-frontend`).
+The frontend is in `../taskx-frontend`.
 
 ## Run it
 
@@ -24,6 +24,8 @@ To move what you already have in the browser to the server:
 1. Before setting `VITE_API_URL`, go to **Settings → Export backup**.
 2. Set `VITE_API_URL` and restart the frontend.
 3. Go to **Settings → Import backup** and choose the file you exported.
+
+Or run everything with Docker from the repo root: `docker compose up --build`.
 
 ### Use Supabase as the database
 
@@ -56,7 +58,8 @@ Then set `DATABASE_URL=postgres://<your-mac-username>@localhost:5432/taskx`.
 | `DATABASE_URL` | required | Postgres connection string |
 | `HOST` / `PORT` | `127.0.0.1` / `8080` | Where the API listens |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Browser origins allowed to call the API |
-| `WORKSPACE_ID` | `default` | All data is stored under this workspace until sign-in exists |
+| `AUTH` | `on` | `on`: people sign up and sign in; each account has its own workspace. `off`: no sign-in, everything goes to `WORKSPACE_ID` (private machines only) |
+| `WORKSPACE_ID` | `default` | With accounts off, the one workspace. With accounts on, the first account created adopts it, so earlier data carries over |
 | `SCREENSHOT_DIR` | `./storage/screenshots` | Where timer screenshots are written (git-ignored) |
 | `RUST_LOG` | `taskx_backend=info,tower_http=info` | Log level |
 
@@ -66,7 +69,13 @@ Every body is JSON in the frontend's shapes, which are defined in `taskx-fronten
 
 | Method | Path | |
 |---|---|---|
-| GET | `/health` | `{ "ok": true }` when the database answers |
+| GET | `/health` | `{ "ok": true, "version": "…" }` when the database answers |
+| POST | `/api/auth/signup` | `{ email, password, name?, businessName? }` → `{ token, user }` |
+| POST | `/api/auth/login` | `{ email, password }` → `{ token, user }` |
+| POST | `/api/auth/logout` | Ends this session |
+| GET | `/api/auth/me` | `{ authRequired, user }` |
+| POST | `/api/auth/password` | `{ current, next }`; signs out the account's other sessions |
+| GET | `/api/activity?limit=&before=` | The change log, newest first. `before` = an entry id, for paging |
 | GET | `/api/bootstrap` | The whole workspace: `{ workspace, clients, projects, tasks, invoices, expenses }` |
 | POST | `/api/import` | Replace everything with a backup, in one transaction |
 | GET / PUT | `/api/workspace` | Read or replace the business settings |
@@ -76,8 +85,17 @@ Every body is JSON in the frontend's shapes, which are defined in `taskx-fronten
 
 `collection` is one of `clients`, `projects`, `tasks`, `invoices` or `expenses`.
 
+With accounts on, every `/api` route except `/api/auth/*` needs `Authorization: Bearer <token>`. A missing or expired token is a `401`.
+
 - `PATCH` works like `{ ...current, ...fields }` in the app.
 - `DELETE` on something that doesn't exist returns `204`.
+
+### Accounts
+
+- Passwords: at least 8 characters, hashed with Argon2id.
+- Sign-in returns a random token. Only its SHA-256 is stored, in `sessions`.
+- Sessions last 30 days from last use.
+- After 8 wrong passwords for one email in 15 minutes, sign-in for it is refused (`429`) until the window passes. Unknown emails take as long to check as known ones.
 
 ### Rules the server enforces
 
@@ -126,6 +144,9 @@ The API tests cover these flows end to end:
 - Import
 - Screenshot folders
 - CORS
+- Accounts: sign up, sign in, separate workspaces, sign out, password change, sign-in limits
+- Partial payments
+- The activity log
 
 Each test uses its own workspace.
 
@@ -133,9 +154,11 @@ Each test uses its own workspace.
 
 ```
 migrations/0001_init.sql   Tables, keys, checks, indexes, row-level security
+migrations/0003_…sql       Users, sessions, activity log, invoice payments
 src/main.rs                Config, database pool, migrations, server
+src/auth.rs                Accounts, sessions, password hashing, sign-in limits
 src/lib.rs                 Router + middleware (CORS, body limits, tracing)
-src/routes.rs              Handlers; `Ws` extractor = the workspace for a request
+src/routes.rs              Handlers; `Ws` extractor = the signed-in user's workspace
 src/db.rs                  `Entity` trait: SQL and business rules per table
 src/models.rs              API shapes and validation
 src/screenshots.rs         Screenshot paths and storage
@@ -145,7 +168,8 @@ tests/api.rs               API tests
 
 ## Next
 
-- **Sign-in:** Supabase Auth. Verify the JWT in the `Ws` extractor and map the user to their workspace. That's the only place that changes.
+- **Teams:** invite people into a workspace with roles.
+- **Password reset by email.**
 - **Email from the server:** send invoices with a PDF attached.
 - **Stripe** payment links on invoices.
 - **Google Drive** storage for screenshots.
