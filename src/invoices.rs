@@ -46,12 +46,28 @@ pub fn file_name(inv: &Invoice) -> String {
     let raw = format!("{} {}", inv.number, inv.client.name);
     let clean: String = raw
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || " -_.".contains(c) {
-                c
-            } else {
-                ' '
-            }
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() || " -_.".contains(c) => c.to_string(),
+            'à'..='å' => "a".into(),
+            'À'..='Å' => "A".into(),
+            'è'..='ë' => "e".into(),
+            'È'..='Ë' => "E".into(),
+            'ì'..='ï' => "i".into(),
+            'Ì'..='Ï' => "I".into(),
+            'ò'..='ö' | 'ø' => "o".into(),
+            'Ò'..='Ö' | 'Ø' => "O".into(),
+            'ù'..='ü' => "u".into(),
+            'Ù'..='Ü' => "U".into(),
+            'ç' => "c".into(),
+            'Ç' => "C".into(),
+            'ñ' => "n".into(),
+            'Ñ' => "N".into(),
+            'ý' | 'ÿ' => "y".into(),
+            'ß' => "ss".into(),
+            'æ' => "ae".into(),
+            'Æ' => "AE".into(),
+            '&' => "and".into(),
+            _ => " ".into(),
         })
         .collect();
     let squashed = clean.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -299,7 +315,7 @@ mod tests {
         };
         assert_eq!(
             name("INV-0007", "Acme Café / \"Ltd\""),
-            "INV-0007 Acme Caf Ltd.pdf"
+            "INV-0007 Acme Cafe Ltd.pdf"
         );
         assert_eq!(name("", "///"), "invoice.pdf");
     }
