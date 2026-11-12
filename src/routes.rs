@@ -108,6 +108,17 @@ pub fn api() -> Router<AppState> {
         .route("/api/invoices/{id}/reminders", get(crate::reminders::list))
         .route("/api/invoices/{id}/remind", post(crate::reminders::remind))
         .route("/api/cron/reminders", post(crate::reminders::cron))
+        .route(
+            "/api/clients/{id}/portal",
+            get(crate::portal::get_link)
+                .post(crate::portal::enable)
+                .delete(crate::portal::disable),
+        )
+        .route("/api/portal/{token}", get(crate::portal::page))
+        .route(
+            "/api/portal/{token}/invoices/{id}/pdf",
+            get(crate::portal::pdf),
+        )
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/import", post(import))
         .route("/api/workspace", get(get_workspace).put(put_workspace))

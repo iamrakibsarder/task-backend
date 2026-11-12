@@ -99,6 +99,11 @@ Every body is JSON in the frontend's shapes, which are defined in `taskx-fronten
 | GET | `/api/{collection}` | List one collection |
 | GET / PUT / PATCH / DELETE | `/api/{collection}/{id}` | Read, create-or-replace, merge fields, or delete one record |
 | GET | `/api/invoices/{id}/pdf` | The invoice as a PDF |
+| GET | `/api/clients/{id}/portal` | The client's portal link: `{ enabled, url, lastViewedAt }` |
+| POST | `/api/clients/{id}/portal` | `{ regenerate? }`: turn the portal on (admin); `regenerate` makes a new link and stops the old one |
+| DELETE | `/api/clients/{id}/portal` | Turn the portal off (admin) |
+| GET | `/api/portal/{token}` | Public, no sign-in: the business, the client and their sent/paid invoices with what's owed |
+| GET | `/api/portal/{token}/invoices/{id}/pdf` | Public: one of those invoices as a PDF |
 | GET | `/api/invoices/{id}/reminders` | Reminders sent, the next scheduled date, and a ready-made draft |
 | POST | `/api/invoices/{id}/remind` | `{ to, subject?, body?, copyMe? }`: emails a reminder now with the PDF. `409` if nothing is owed |
 | POST | `/api/cron/reminders` | `Authorization: Bearer $CRON_SECRET`: sends the reminders due today → `{ sent, failed }` |
@@ -197,6 +202,7 @@ src/mail.rs                SMTP / log / in-memory mailers, attachments
 src/pdf.rs                 Invoice PDFs (no dependencies)
 src/invoices.rs            PDF download, send invoice by email
 src/reminders.rs           Payment reminders: schedule, job, send by hand
+src/portal.rs              Client portal: private invoice page per client
 src/lib.rs                 Router + middleware (CORS, body limits, tracing)
 src/routes.rs              Handlers; `Ws` extractor = the signed-in user's workspace
 src/db.rs                  `Entity` trait: SQL and business rules per table

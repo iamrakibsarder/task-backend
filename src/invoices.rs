@@ -239,15 +239,20 @@ pub(crate) struct Outgoing {
 /// Sends `out` from the business's name with `inv` as a PDF. Mail errors become a 502.
 pub(crate) async fn mail_invoice(
     st: &AppState,
+    ws_id: &str,
     w: &Workspace,
     inv: &Invoice,
     from: &SenderSnapshot,
     out: Outgoing,
 ) -> ApiResult<()> {
+    let body = match crate::portal::active_url(st, ws_id, &inv.client_id).await? {
+        Some(url) => with_portal_link(&out.body, &url),
+        None => out.body,
+    };
     let email = Email {
         to: out.to,
         subject: out.subject,
-        body: out.body,
+        body,
         cc: out.cc,
         reply_to: clean_email(&w.email).ok().or(out.me),
         from_name: (!from.business_name.trim().is_empty())
@@ -270,6 +275,20 @@ pub(crate) async fn mail_invoice(
             "The mail server took too long. Try again in a minute.".into(),
         )),
     }
+}
+
+/// Adds the client portal link before the sign-off (unless the message already has it).
+pub fn with_portal_link(body: &str, url: &str) -> String {
+    if body.contains(url) {
+        return body.to_string();
+    }
+    let block = format!("See all your invoices and download them any time:\n{url}\n\n");
+    for marker in ["Let me know if you have any questions", "Thank you,"] {
+        if let Some(i) = body.find(marker) {
+            return format!("{}{block}{}", &body[..i], &body[i..]);
+        }
+    }
+    format!("{}\n\n{}", body.trim_end(), block.trim_end())
 }
 
 /// Who's signed in, for copies and replies.
@@ -325,6 +344,7 @@ pub async fn send(
 
     mail_invoice(
         &st,
+        &ws.id,
         &w,
         &next,
         &from,
@@ -402,5 +422,17 @@ mod tests {
         assert_eq!(super::hours_text(405), "6:45 (6.75 hours)");
         assert_eq!(super::hours_text(90), "1:30 (1.5 hours)");
         assert_eq!(super::hours_text(120), "2 hours");
+    }
+
+    #[test]
+    fn portal_link_goes_before_the_sign_off() {
+        let url = "https://app.test/portal/abc";
+        let b = super::with_portal_link("Hi,\n\nPay me.\n\nThank you,\nAl", url);
+        assert_eq!(
+            b,
+            "Hi,\n\nPay me.\n\nSee all your invoices and download them any time:\nhttps://app.test/portal/abc\n\nThank you,\nAl"
+        );
+        assert_eq!(super::with_portal_link(&b, url), b);
+        assert!(super::with_portal_link("Short", url).ends_with(url));
     }
 }

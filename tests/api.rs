@@ -1343,3 +1343,156 @@ async fn unpaid_invoices_get_payment_reminders() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn clients_get_a_private_invoice_portal() {
+    let Some(mut t) = setup("portal").await else {
+        return;
+    };
+    t.seed().await;
+    // Off until turned on.
+    let (s, v) = t.call(Method::GET, "/api/clients/c1/portal", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["enabled"], false);
+    assert_eq!(
+        t.call(Method::GET, "/api/clients/nope/portal", None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A sent invoice, a paid one and a draft.
+    let mut sent = invoice();
+    sent["status"] = json!("sent");
+    sent["issueDate"] = json!("2020-01-01");
+    sent["dueDate"] = json!("2020-01-15");
+    assert_eq!(
+        t.put("/api/invoices/i1", sent.clone()).await.0,
+        StatusCode::OK
+    );
+    let mut paid = invoice();
+    paid["id"] = json!("i2");
+    paid["seq"] = json!(2);
+    paid["number"] = json!("INV-0002");
+    paid["lines"][0]["taskIds"] = json!([]);
+    paid["status"] = json!("paid");
+    paid["paidAt"] = json!("2026-11-10");
+    assert_eq!(t.put("/api/invoices/i2", paid).await.0, StatusCode::OK);
+    let mut draft = invoice();
+    draft["id"] = json!("i3");
+    draft["seq"] = json!(3);
+    draft["number"] = json!("INV-0003");
+    draft["lines"][0]["taskIds"] = json!([]);
+    assert_eq!(t.put("/api/invoices/i3", draft).await.0, StatusCode::OK);
+
+    let (s, v) = t.post("/api/clients/c1/portal", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["enabled"], true);
+    let url = v["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://app.test/portal/"), "{url}");
+    let token = url.rsplit('/').next().unwrap().to_string();
+    assert_eq!(token.len(), 64);
+    // Turning it on again keeps the same link.
+    let (_, v) = t.post("/api/clients/c1/portal", json!({})).await;
+    assert_eq!(v["url"], url);
+
+    // The public page works without signing in.
+    let saved = t.token.take();
+    let (s, p) = t
+        .call(Method::GET, &format!("/api/portal/{token}"), None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    assert_eq!(p["client"]["name"], "Northwind");
+    let numbers: Vec<_> = p["invoices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["number"].clone())
+        .collect();
+    assert_eq!(numbers, vec![json!("INV-0002"), json!("INV-0001")]);
+    assert_eq!(p["invoices"][1]["status"], "overdue");
+    assert_eq!(p["invoices"][1]["balance"], 97.5);
+    assert_eq!(p["invoices"][0]["status"], "paid");
+    assert_eq!(p["invoices"][0]["balance"], 0.0);
+    assert_eq!(
+        p["owed"],
+        json!([{"currency": "USD", "balance": 97.5, "overdue": 97.5}])
+    );
+    let (s, ct, bytes) = t
+        .get_raw(&format!("/api/portal/{token}/invoices/i1/pdf"))
+        .await;
+    assert_eq!((s, ct.as_str()), (StatusCode::OK, "application/pdf"));
+    assert!(bytes.starts_with(b"%PDF"));
+    // Drafts, other ids and bad tokens are not found.
+    assert_eq!(
+        t.get_raw(&format!("/api/portal/{token}/invoices/i3/pdf"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.call(Method::GET, "/api/portal/abc", None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.call(
+            Method::GET,
+            &format!("/api/portal/{}", "0".repeat(64)),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    t.token = saved;
+    let (_, v) = t.call(Method::GET, "/api/clients/c1/portal", None).await;
+    assert!(v["lastViewedAt"].is_string(), "{v}");
+
+    // Emails to this client carry the link.
+    let (s, _) = t
+        .post(
+            "/api/invoices/i1/send",
+            json!({"to": "a@b.co", "body": "Hi\n\nThank you,\nAl"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let mail = t.email_to("a@b.co").await.unwrap();
+    assert!(mail.body.contains(&url), "{}", mail.body);
+
+    // A new link stops the old one; turning it off stops it too.
+    let (_, v) = t
+        .post("/api/clients/c1/portal", json!({"regenerate": true}))
+        .await;
+    let new_url = v["url"].as_str().unwrap().to_string();
+    assert_ne!(new_url, url);
+    assert_eq!(
+        t.call(Method::GET, &format!("/api/portal/{token}"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let new_token = new_url.rsplit('/').next().unwrap().to_string();
+    assert_eq!(
+        t.call(Method::GET, &format!("/api/portal/{new_token}"), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (s, v) = t.call(Method::DELETE, "/api/clients/c1/portal", None).await;
+    assert_eq!((s, v["enabled"].clone()), (StatusCode::OK, json!(false)));
+    assert_eq!(
+        t.call(Method::GET, &format!("/api/portal/{new_token}"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    t.mail.sent.lock().unwrap().clear();
+    t.post("/api/invoices/i1/send", json!({"to": "a@b.co"}))
+        .await;
+    assert!(!t
+        .email_to("a@b.co")
+        .await
+        .unwrap()
+        .body
+        .contains("/portal/"));
+}

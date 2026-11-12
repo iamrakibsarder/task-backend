@@ -248,7 +248,7 @@ async fn run_locked(st: &AppState, today: NaiveDate, report: &mut RunReport) -> 
             cc: vec![],
             me: None,
         };
-        match mail_invoice(st, &w, &inv, &from, out).await {
+        match mail_invoice(st, &ws, &w, &inv, &from, out).await {
             Ok(()) => {
                 report.sent += 1;
                 let when = when_text(stage);
@@ -429,7 +429,7 @@ pub async fn remind(
         cc,
         me,
     };
-    mail_invoice(&st, &w, &inv, &from, out).await?;
+    mail_invoice(&st, &ws.id, &w, &inv, &from, out).await?;
 
     let mut tx = st.db.begin().await?;
     sqlx::query(
