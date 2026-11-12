@@ -60,6 +60,9 @@ Then set `DATABASE_URL=postgres://<your-mac-username>@localhost:5432/taskx`.
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Browser origins allowed to call the API |
 | `AUTH` | `on` | `on`: people sign up and sign in; each account has its own workspace. `off`: no sign-in, everything goes to `WORKSPACE_ID` (private machines only) |
 | `WORKSPACE_ID` | `default` | With accounts off, the one workspace. With accounts on, the first account created adopts it, so earlier data carries over |
+| `APP_URL` | `http://localhost:5173` | The web app's address, used in reset and invite links |
+| `SMTP_URL` | empty | `smtps://user:pass@host:465` or `smtp://host:25`. Empty: emails are written to the log instead (local use only) |
+| `MAIL_FROM` | `TaskX <no-reply@localhost>` | Sender of reset and invite emails |
 | `SCREENSHOT_DIR` | `./storage/screenshots` | Where timer screenshots are written (git-ignored) |
 | `RUST_LOG` | `taskx_backend=info,tower_http=info` | Log level |
 
@@ -70,11 +73,22 @@ Every body is JSON in the frontend's shapes, which are defined in `taskx-fronten
 | Method | Path | |
 |---|---|---|
 | GET | `/health` | `{ "ok": true, "version": "…" }` when the database answers |
-| POST | `/api/auth/signup` | `{ email, password, name?, businessName? }` → `{ token, user }` |
+| POST | `/api/auth/signup` | `{ email, password, name?, businessName?, invite? }` → `{ token, user }`. With an invite token, joins that team |
 | POST | `/api/auth/login` | `{ email, password }` → `{ token, user }` |
 | POST | `/api/auth/logout` | Ends this session |
-| GET | `/api/auth/me` | `{ authRequired, user }` |
+| GET | `/api/auth/me` | `{ authRequired, user: { …, role, workspaceName }, mailEnabled }` |
 | POST | `/api/auth/password` | `{ current, next }`; signs out the account's other sessions |
+| POST | `/api/auth/forgot` | `{ email }` → always `204`; emails a 1-hour reset link if the account exists |
+| POST | `/api/auth/reset` | `{ token, password }` → `{ token, user }`; signs out every other session |
+| GET / POST | `/api/workspaces` | Workspaces you belong to / create one `{ name }` (you own it and switch to it) |
+| POST | `/api/workspaces/switch` | `{ workspaceId }` |
+| GET | `/api/team` | `{ members, invites, role }` (invites only for owners and admins) |
+| POST | `/api/team/invites` | `{ email, role: admin\|member }` → `{ invite, link, emailed }` (admin+) |
+| DELETE | `/api/team/invites/{id}` | Cancel an invite (admin+) |
+| PATCH | `/api/team/members/{userId}` | `{ role }` (owners only) |
+| DELETE | `/api/team/members/{userId}` | Remove someone (admin+), or leave with your own id |
+| GET | `/api/invites/{token}` | Public: who invited you, to which workspace, as what |
+| POST | `/api/invites/{token}/accept` | Signed in with the invited email: join and switch to it |
 | GET | `/api/activity?limit=&before=` | The change log, newest first. `before` = an entry id, for paging |
 | GET | `/api/bootstrap` | The whole workspace: `{ workspace, clients, projects, tasks, invoices, expenses }` |
 | POST | `/api/import` | Replace everything with a backup, in one transaction |
@@ -96,6 +110,18 @@ With accounts on, every `/api` route except `/api/auth/*` needs `Authorization: 
 - Sign-in returns a random token. Only its SHA-256 is stored, in `sessions`.
 - Sessions last 30 days from last use.
 - After 8 wrong passwords for one email in 15 minutes, sign-in for it is refused (`429`) until the window passes. Unknown emails take as long to check as known ones.
+
+### Teams
+
+- Roles: **owner** (everything, including roles), **admin** (invite and remove members, settings, import), **member** (clients, projects, tasks, invoices, expenses). Others get `403`.
+- A workspace always keeps at least one owner; only owners remove owners.
+- Invites are for one email, single use, valid 7 days; inviting again replaces the link. The link is returned to the sender too, so it works without email set up.
+- Someone removed from the workspace they're in moves to another of theirs on their next request, or gets a new empty one.
+
+### Password reset
+
+- Links are single use, valid one hour, stored hashed; a new request replaces older links.
+- The reply is the same whether or not the email has an account, and requests are rate limited per email.
 
 ### Rules the server enforces
 
@@ -155,8 +181,11 @@ Each test uses its own workspace.
 ```
 migrations/0001_init.sql   Tables, keys, checks, indexes, row-level security
 migrations/0003_…sql       Users, sessions, activity log, invoice payments
+migrations/0004_…sql       Memberships, invites, password resets
 src/main.rs                Config, database pool, migrations, server
-src/auth.rs                Accounts, sessions, password hashing, sign-in limits
+src/auth.rs                Accounts, sessions, password hashing, sign-in limits, reset
+src/team.rs                Workspaces, members, roles, invites
+src/mail.rs                SMTP / log / in-memory mailers
 src/lib.rs                 Router + middleware (CORS, body limits, tracing)
 src/routes.rs              Handlers; `Ws` extractor = the signed-in user's workspace
 src/db.rs                  `Entity` trait: SQL and business rules per table
@@ -168,8 +197,6 @@ tests/api.rs               API tests
 
 ## Next
 
-- **Teams:** invite people into a workspace with roles.
-- **Password reset by email.**
 - **Email from the server:** send invoices with a PDF attached.
 - **Stripe** payment links on invoices.
 - **Google Drive** storage for screenshots.
