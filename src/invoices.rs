@@ -134,37 +134,66 @@ pub struct SendBody {
     sent_at: Option<NaiveDate>,
 }
 
+/// Minutes of work billed: hourly, retainer, overage and covered lines (not expenses or custom).
+pub fn billed_minutes(inv: &Invoice) -> i64 {
+    inv.lines
+        .iter()
+        .filter(|l| l.kind != "expense" && l.kind != "custom")
+        .map(|l| l.minutes.max(0))
+        .sum()
+}
+
+/// `6:45 (6.75 hours)`, or `6 hours` on the hour.
+fn hours_text(min: i64) -> String {
+    if min % 60 == 0 {
+        format!("{} hour{}", min / 60, if min == 60 { "" } else { "s" })
+    } else {
+        let dec = format!("{:.2}", min as f64 / 60.0);
+        let dec = dec.trim_end_matches('0');
+        format!("{}:{:02} ({dec} hours)", min / 60, min % 60)
+    }
+}
+
 fn default_message(inv: &Invoice, from: &SenderSnapshot) -> (String, String) {
     let t = pdf::totals(inv);
     let settled = t.credited > 0.0 || t.paid > 0.0;
     let due = pdf::money(if settled { t.balance } else { t.total }, &inv.currency);
+    let due_by = inv.due_date.format("%-d %b %Y");
     let business = if from.business_name.is_empty() {
         "us"
     } else {
         &from.business_name
     };
-    let subject = format!(
-        "Invoice {} from {business}: {due} due {}",
-        inv.number,
-        inv.due_date.format("%-d %b %Y")
-    );
+    let subject = format!("Invoice {} from {business}: {due} due {due_by}", inv.number);
+    let name = if inv.client.contact.is_empty() {
+        &inv.client.name
+    } else {
+        &inv.client.contact
+    };
+    let period = if inv.period.is_empty() {
+        String::new()
+    } else {
+        format!(" for {}", pdf::month_label(&inv.period))
+    };
     let mut body = format!(
-        "Hi {},\n\nHere is invoice {}. The {} is {due}, due by {}.\n\n",
-        if inv.client.contact.is_empty() {
-            &inv.client.name
-        } else {
-            &inv.client.contact
-        },
-        inv.number,
-        if settled { "balance" } else { "total" },
-        inv.due_date.format("%-d %b %Y"),
+        "Hi {name},\n\nPlease find attached invoice {}{period}.\n\n",
+        inv.number
+    );
+    let min = billed_minutes(inv);
+    if min > 0 {
+        body.push_str(&format!("Your total hours: {}\n", hours_text(min)));
+    }
+    body.push_str(&format!(
+        "{}: {due}, by {due_by}\n\n",
+        if settled { "Balance due" } else { "Amount due" }
+    ));
+    body.push_str(
+        "See the attached invoice (PDF) for the full breakdown of the work and charges.\n\n",
     );
     if !from.payment_info.is_empty() {
         body.push_str(&format!("How to pay:\n{}\n\n", from.payment_info));
     }
-    body.push_str(
-        "The invoice is attached as a PDF. Let me know if you have any questions.\n\nThank you,\n",
-    );
+    body.push_str("Let me know if you have any questions.\n\nThank you,\n");
     body.push_str(if from.owner_name.is_empty() {
         business
     } else {
@@ -182,7 +211,7 @@ pub async fn send(
 ) -> ApiResult<Json<Value>> {
     if !st.mailer.delivers() {
         return Err(ApiError::conflict(
-            "Email isn't set up on this server (SMTP_URL). Use “Open in mail” instead.",
+            "Email isn’t set up on this server (SMTP_USER and SMTP_PASSWORD). Use “Open in mail” instead.",
         ));
     }
     let to = clean_email(&b.to)?;
@@ -318,5 +347,18 @@ mod tests {
             "INV-0007 Acme Cafe Ltd.pdf"
         );
         assert_eq!(name("", "///"), "invoice.pdf");
+    }
+
+    #[test]
+    fn default_email_states_total_hours() {
+        let inv = crate::pdf::tests::sample(3);
+        let min = super::billed_minutes(&inv);
+        assert!(min > 0);
+        let (_, body) = super::default_message(&inv, &super::SenderSnapshot::default());
+        assert!(body.contains("Your total hours: "), "{body}");
+        assert!(body.contains("See the attached invoice (PDF)"));
+        assert_eq!(super::hours_text(405), "6:45 (6.75 hours)");
+        assert_eq!(super::hours_text(90), "1:30 (1.5 hours)");
+        assert_eq!(super::hours_text(120), "2 hours");
     }
 }

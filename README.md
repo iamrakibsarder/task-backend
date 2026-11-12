@@ -62,7 +62,9 @@ Then set `DATABASE_URL=postgres://<your-mac-username>@localhost:5432/taskx`.
 | `WORKSPACE_ID` | `default` | With accounts off, the one workspace. With accounts on, the first account created adopts it, so earlier data carries over |
 | `APP_URL` | `http://localhost:5173` | The web app's address, used in reset and invite links |
 | `SMTP_URL` | empty | `smtps://user:pass@host:465` or `smtp://host:25`. Empty: emails are written to the log instead (local use only) |
-| `MAIL_FROM` | `TaskX <no-reply@localhost>` | Sender of reset and invite emails |
+| `SMTP_USER` / `SMTP_PASSWORD` | empty | Instead of `SMTP_URL`: a login, no URL-encoding needed. Gmail: your address and a 16-letter [app password](https://myaccount.google.com/apppasswords) |
+| `SMTP_HOST` | `smtp.gmail.com` | With `SMTP_USER`: `host` (TLS on 465), `host:port`, or `host:587` (STARTTLS) |
+| `MAIL_FROM` | `TaskX <SMTP_USER>`, else `TaskX <no-reply@localhost>` | Sender of all emails. With Gmail it must be your Gmail address (or a verified alias) |
 | `SCREENSHOT_DIR` | `./storage/screenshots` | Where timer screenshots are written (git-ignored) |
 | `RUST_LOG` | `taskx_backend=info,tower_http=info` | Log level |
 

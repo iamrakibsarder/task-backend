@@ -179,7 +179,7 @@ fn long_date(d: NaiveDate) -> String {
     format!("{} {} {}", d.day(), MON3[d.month0() as usize], d.year())
 }
 
-fn month_label(m: &str) -> String {
+pub fn month_label(m: &str) -> String {
     let mut it = m.split('-');
     match (
         it.next().and_then(|y| y.parse::<i32>().ok()),

@@ -29,7 +29,7 @@ async fn main() {
 
     let mailer: Arc<dyn taskx_backend::mail::Mailer> = if cfg.smtp_url.is_empty() {
         tracing::warn!(
-            "SMTP_URL is not set: reset and invite emails are written to the log instead of sent"
+            "No SMTP_URL or SMTP_USER/SMTP_PASSWORD: emails are written to the log instead of sent"
         );
         Arc::new(taskx_backend::mail::LogMailer)
     } else {
