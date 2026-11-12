@@ -45,18 +45,18 @@ async fn main() {
     let screenshots = Arc::new(DiskStore {
         root: cfg.screenshot_dir.clone().into(),
     });
-    let router = app(
-        AppState {
-            db,
-            workspace_id: cfg.workspace_id.clone(),
-            auth_required: cfg.auth_required,
-            limiter: Arc::new(taskx_backend::auth::LoginLimiter::default()),
-            mailer,
-            app_url: cfg.app_url.clone(),
-            screenshots,
-        },
-        &cfg.cors_origins,
-    );
+    let state = AppState {
+        db,
+        workspace_id: cfg.workspace_id.clone(),
+        auth_required: cfg.auth_required,
+        limiter: Arc::new(taskx_backend::auth::LoginLimiter::default()),
+        mailer,
+        app_url: cfg.app_url.clone(),
+        screenshots,
+        cron_secret: cfg.cron_secret.clone(),
+    };
+    taskx_backend::reminders::spawn_scheduler(state.clone());
+    let router = app(state, &cfg.cors_origins);
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

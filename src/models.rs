@@ -80,10 +80,24 @@ pub struct Workspace {
     /// Minutes between timer screenshots. 0 = off.
     #[serde(default = "five")]
     pub screenshot_minutes: i32,
+    /// Email payment reminders for unpaid invoices.
+    #[serde(default)]
+    pub reminders_on: bool,
+    /// When, in days from the due date: `-3` = three days before, `7` = a week late.
+    #[serde(default = "default_reminder_days")]
+    pub reminder_days: Vec<i32>,
 }
 
 fn five() -> i32 {
     5
+}
+
+pub fn default_reminder_days() -> Vec<i32> {
+    vec![-3, 0, 7, 14]
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Workspace {
@@ -105,6 +119,17 @@ impl Workspace {
             return Err(ApiError::bad(
                 "screenshotMinutes must be between 0 and 240.",
             ));
+        }
+        if self.reminder_days.len() > 8 {
+            return Err(ApiError::bad("Use at most 8 reminder days."));
+        }
+        if self.reminder_days.iter().any(|d| !(-30..=90).contains(d)) {
+            return Err(ApiError::bad(
+                "Reminder days must be between 30 days before and 90 days after the due date.",
+            ));
+        }
+        if self.reminders_on && self.reminder_days.is_empty() {
+            return Err(ApiError::bad("Choose when reminders go out."));
         }
         Ok(())
     }
@@ -141,6 +166,9 @@ pub struct Client {
     #[serde(default)]
     pub cap: Decimal,
     pub active: bool,
+    /// Gets automatic payment reminders (when they're on for the workspace).
+    #[serde(default = "yes")]
+    pub reminders: bool,
     #[serde(default)]
     #[sqlx(rename = "created_ms")]
     pub created_at: i64,

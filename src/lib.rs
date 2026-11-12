@@ -8,6 +8,7 @@ pub mod invoices;
 pub mod mail;
 pub mod models;
 pub mod pdf;
+pub mod reminders;
 pub mod routes;
 pub mod screenshots;
 pub mod team;

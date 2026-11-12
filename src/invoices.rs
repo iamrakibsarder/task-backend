@@ -31,7 +31,7 @@ use crate::routes::{AppState, Ws};
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn sender_of(w: &Workspace) -> SenderSnapshot {
+pub(crate) fn sender_of(w: &Workspace) -> SenderSnapshot {
     SenderSnapshot {
         business_name: w.business_name.clone(),
         owner_name: w.owner_name.clone(),
@@ -81,7 +81,7 @@ pub fn file_name(inv: &Invoice) -> String {
     )
 }
 
-async fn load(st: &AppState, ws: &Ws, id: &str) -> ApiResult<(Invoice, Workspace)> {
+pub(crate) async fn load(st: &AppState, ws: &Ws, id: &str) -> ApiResult<(Invoice, Workspace)> {
     let mut c = st.db.acquire().await?;
     let inv: Invoice = db::fetch(&mut c, &ws.id, id)
         .await?
@@ -144,7 +144,7 @@ pub fn billed_minutes(inv: &Invoice) -> i64 {
 }
 
 /// `6:45 (6.75 hours)`, or `6 hours` on the hour.
-fn hours_text(min: i64) -> String {
+pub(crate) fn hours_text(min: i64) -> String {
     if min % 60 == 0 {
         format!("{} hour{}", min / 60, if min == 60 { "" } else { "s" })
     } else {
@@ -202,6 +202,87 @@ fn default_message(inv: &Invoice, from: &SenderSnapshot) -> (String, String) {
     (subject, body)
 }
 
+/// The subject and body the person typed, or the defaults when left empty.
+pub(crate) fn message_or(
+    subject: Option<String>,
+    body: Option<String>,
+    (default_subject, default_body): (String, String),
+) -> ApiResult<(String, String)> {
+    let subject = subject
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_subject);
+    if subject.contains(['\r', '\n']) || subject.chars().count() > 250 {
+        return Err(ApiError::bad(
+            "Keep the subject to one line under 250 characters.",
+        ));
+    }
+    let body = body
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(default_body);
+    if body.len() > 50_000 {
+        return Err(ApiError::bad("The message is too long."));
+    }
+    Ok((subject, body))
+}
+
+/// One email about an invoice, with its PDF attached.
+pub(crate) struct Outgoing {
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    pub cc: Vec<String>,
+    /// The signed-in sender's email: replies go here when the business has no email.
+    pub me: Option<String>,
+}
+
+/// Sends `out` from the business's name with `inv` as a PDF. Mail errors become a 502.
+pub(crate) async fn mail_invoice(
+    st: &AppState,
+    w: &Workspace,
+    inv: &Invoice,
+    from: &SenderSnapshot,
+    out: Outgoing,
+) -> ApiResult<()> {
+    let email = Email {
+        to: out.to,
+        subject: out.subject,
+        body: out.body,
+        cc: out.cc,
+        reply_to: clean_email(&w.email).ok().or(out.me),
+        from_name: (!from.business_name.trim().is_empty())
+            .then(|| from.business_name.trim().replace(['"', '<', '>'], "")),
+        attachments: vec![Attachment {
+            filename: file_name(inv),
+            content_type: "application/pdf".into(),
+            bytes: invoice_pdf(inv, from),
+        }],
+    };
+    match tokio::time::timeout(SEND_TIMEOUT, st.mailer.send(email)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            tracing::error!(invoice = %inv.number, error = %e, "sending invoice email failed");
+            Err(ApiError::Upstream(
+                "The mail server didn't accept the email. Check the address, or try again in a minute.".into(),
+            ))
+        }
+        Err(_) => Err(ApiError::Upstream(
+            "The mail server took too long. Try again in a minute.".into(),
+        )),
+    }
+}
+
+/// Who's signed in, for copies and replies.
+pub(crate) async fn my_email(st: &AppState, ws: &Ws) -> ApiResult<Option<String>> {
+    if ws.user_id.is_empty() {
+        return Ok(None);
+    }
+    Ok(sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(&ws.user_id)
+        .fetch_optional(&st.db)
+        .await?)
+}
+
 /// `POST /api/invoices/{id}/send`: `{ to, subject?, body?, copyMe?, sentAt? }` → the saved invoice.
 pub async fn send(
     State(st): State<AppState>,
@@ -222,35 +303,10 @@ pub async fn send(
         ));
     }
     let from = sender_of(&w);
-    let (default_subject, default_body) = default_message(&inv, &from);
-    let subject = b
-        .subject
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default_subject);
-    if subject.contains(['\r', '\n']) || subject.chars().count() > 250 {
-        return Err(ApiError::bad(
-            "Keep the subject to one line under 250 characters.",
-        ));
-    }
-    let body = b
-        .body
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(default_body);
-    if body.len() > 50_000 {
-        return Err(ApiError::bad("The message is too long."));
-    }
+    let (subject, body) = message_or(b.subject, b.body, default_message(&inv, &from))?;
 
     // Who's sending: for the copy, and for replies if the business has no email.
-    let me: Option<String> = if ws.user_id.is_empty() {
-        None
-    } else {
-        sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-            .bind(&ws.user_id)
-            .fetch_optional(&st.db)
-            .await?
-    };
-    let reply_to = clean_email(&w.email).ok().or_else(|| me.clone());
+    let me = my_email(&st, &ws).await?;
     let cc = if b.copy_me {
         me.clone().filter(|m| *m != to).into_iter().collect()
     } else {
@@ -267,34 +323,20 @@ pub async fn send(
     next.client.0.email = to.clone();
     next.validate()?;
 
-    let email = Email {
-        to: to.clone(),
-        subject,
-        body,
-        cc,
-        reply_to,
-        from_name: (!from.business_name.trim().is_empty())
-            .then(|| from.business_name.trim().replace(['"', '<', '>'], "")),
-        attachments: vec![Attachment {
-            filename: file_name(&next),
-            content_type: "application/pdf".into(),
-            bytes: invoice_pdf(&next, &from),
-        }],
-    };
-    match tokio::time::timeout(SEND_TIMEOUT, st.mailer.send(email)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::error!(invoice = %inv.number, error = %e, "sending invoice failed");
-            return Err(ApiError::Upstream(
-                "The mail server didn't accept the email. Check the address, or try again in a minute.".into(),
-            ));
-        }
-        Err(_) => {
-            return Err(ApiError::Upstream(
-                "The mail server took too long. Try again in a minute.".into(),
-            ))
-        }
-    }
+    mail_invoice(
+        &st,
+        &w,
+        &next,
+        &from,
+        Outgoing {
+            to: to.clone(),
+            subject,
+            body,
+            cc,
+            me,
+        },
+    )
+    .await?;
 
     // Sent: record it. Lock the row so a payment recorded meanwhile isn't overwritten.
     let mut tx = st.db.begin().await?;

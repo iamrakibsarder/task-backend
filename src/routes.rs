@@ -30,6 +30,8 @@ pub struct AppState {
     pub app_url: String,
     /// Where timer screenshots go (disk now, Google Drive later).
     pub screenshots: Arc<dyn crate::screenshots::ScreenshotStore>,
+    /// Lets an outside scheduler run the reminder job. Empty = that endpoint is off.
+    pub cron_secret: String,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -103,6 +105,9 @@ pub fn api() -> Router<AppState> {
         .route("/api/invites/{token}/accept", post(team::accept_invite))
         .route("/api/invoices/{id}/pdf", get(crate::invoices::pdf))
         .route("/api/invoices/{id}/send", post(crate::invoices::send))
+        .route("/api/invoices/{id}/reminders", get(crate::reminders::list))
+        .route("/api/invoices/{id}/remind", post(crate::reminders::remind))
+        .route("/api/cron/reminders", post(crate::reminders::cron))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/import", post(import))
         .route("/api/workspace", get(get_workspace).put(put_workspace))

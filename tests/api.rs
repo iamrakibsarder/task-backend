@@ -23,6 +23,7 @@ use tower::ServiceExt;
 
 struct T {
     app: Router,
+    state: AppState,
     shots: std::path::PathBuf,
     token: Option<String>,
     mail: Arc<MemoryMailer>,
@@ -59,9 +60,11 @@ async fn setup_with(name: &str, auth: bool) -> Option<T> {
         screenshots: Arc::new(DiskStore {
             root: shots.clone(),
         }),
+        cron_secret: "cron-test".into(),
     };
     Some(T {
-        app: app(state, &["http://localhost:5173".into()]),
+        app: app(state.clone(), &["http://localhost:5173".into()]),
+        state,
         shots,
         token: None,
         mail,
@@ -1194,5 +1197,149 @@ async fn invoices_download_as_pdf_and_send_by_email() {
         .await
         .0,
         StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn unpaid_invoices_get_payment_reminders() {
+    use taskx_backend::reminders::{run, RunReport};
+    let Some(t) = setup("reminders").await else {
+        return;
+    };
+    t.seed().await;
+    let day = |s: &str| s.parse::<chrono::NaiveDate>().unwrap();
+    let report = |sent| RunReport { sent, failed: 0 };
+    let (_, mut w) = t.call(Method::GET, "/api/workspace", None).await;
+    assert_eq!(w["remindersOn"], false);
+    assert_eq!(w["reminderDays"], json!([-3, 0, 7, 14]));
+    let mut inv = invoice();
+    inv["status"] = json!("sent");
+    inv["client"]["email"] = json!("pay@northwind.test");
+    assert_eq!(
+        t.put("/api/invoices/i1", inv.clone()).await.0,
+        StatusCode::OK
+    );
+
+    // Off by default: nothing goes out.
+    assert_eq!(run(&t.state, day("2026-11-12")).await.unwrap(), report(0));
+
+    w["remindersOn"] = json!(true);
+    w["reminderDays"] = json!([-3, 0, 7]);
+    assert_eq!(t.put("/api/workspace", w.clone()).await.0, StatusCode::OK);
+    let mut bad = w.clone();
+    bad["reminderDays"] = json!([400]);
+    assert_eq!(
+        t.put("/api/workspace", bad).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // Three days before the due date (15 Nov), once.
+    assert_eq!(run(&t.state, day("2026-11-12")).await.unwrap(), report(1));
+    assert_eq!(run(&t.state, day("2026-11-12")).await.unwrap(), report(0));
+    let mail = t.email_to("pay@northwind.test").await.expect("reminder");
+    assert!(
+        mail.subject.starts_with("Reminder: invoice INV-0001"),
+        "{}",
+        mail.subject
+    );
+    assert!(mail.body.contains("in 3 days"), "{}", mail.body);
+    assert!(mail.attachments[0].bytes.starts_with(b"%PDF"));
+
+    // On the day, then a week late.
+    assert_eq!(run(&t.state, day("2026-11-15")).await.unwrap(), report(1));
+    assert_eq!(run(&t.state, day("2026-11-22")).await.unwrap(), report(1));
+    let mail = t.email_to("pay@northwind.test").await.unwrap();
+    assert!(mail.subject.contains("(7 days late)"), "{}", mail.subject);
+    let (_, act) = t.call(Method::GET, "/api/activity?limit=1", None).await;
+    assert_eq!(
+        act[0]["summary"],
+        "INV-0001 reminder emailed to pay@northwind.test (7 days overdue)"
+    );
+
+    let (s, v) = t
+        .call(Method::GET, "/api/invoices/i1/reminders", None)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    assert_eq!(v["items"][0]["stage"], 7);
+    assert_eq!(v["owes"], true);
+    assert_eq!(v["draft"]["to"], "pay@northwind.test");
+
+    // Saving the invoice from the app doesn't wipe the history.
+    assert_eq!(
+        t.put("/api/invoices/i1", inv.clone()).await.0,
+        StatusCode::OK
+    );
+    let (_, v) = t
+        .call(Method::GET, "/api/invoices/i1/reminders", None)
+        .await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 3);
+
+    // By hand, with a custom message.
+    t.mail.sent.lock().unwrap().clear();
+    let (s, v) = t
+        .post(
+            "/api/invoices/i1/remind",
+            json!({"to": "pay@northwind.test", "subject": "Quick nudge", "body": "Any news?"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["stage"], Value::Null);
+    let mail = t.email_to("pay@northwind.test").await.unwrap();
+    assert_eq!(
+        (mail.subject.as_str(), mail.body.as_str()),
+        ("Quick nudge", "Any news?")
+    );
+
+    // A client opted out gets nothing automatic.
+    let mut c = client();
+    c["reminders"] = json!(false);
+    assert_eq!(t.put("/api/clients/c1", c).await.0, StatusCode::OK);
+    let (_, cv) = t.call(Method::GET, "/api/clients/c1", None).await;
+    assert_eq!(cv["reminders"], false);
+    let mut inv2 = inv.clone();
+    inv2["id"] = json!("i2");
+    inv2["seq"] = json!(2);
+    inv2["number"] = json!("INV-0002");
+    inv2["lines"][0]["taskIds"] = json!([]);
+    inv2["dueDate"] = json!("2026-12-01");
+    assert_eq!(
+        t.put("/api/invoices/i2", inv2.clone()).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(run(&t.state, day("2026-12-01")).await.unwrap(), report(0));
+
+    // Paid invoices get nothing, and can't be reminded by hand.
+    let mut c = client();
+    c["reminders"] = json!(true);
+    assert_eq!(t.put("/api/clients/c1", c).await.0, StatusCode::OK);
+    inv2["status"] = json!("paid");
+    inv2["paidAt"] = json!("2026-11-30");
+    assert_eq!(t.put("/api/invoices/i2", inv2).await.0, StatusCode::OK);
+    assert_eq!(run(&t.state, day("2026-12-01")).await.unwrap(), report(0));
+    assert_eq!(
+        t.post(
+            "/api/invoices/i2/remind",
+            json!({"to": "pay@northwind.test"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+
+    // The cron endpoint needs the secret.
+    assert_eq!(
+        t.post("/api/cron/reminders", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/cron/reminders")
+        .header("authorization", "Bearer cron-test")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        t.app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
     );
 }

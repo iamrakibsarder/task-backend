@@ -195,7 +195,8 @@ pub fn describe_settings(prev: &Workspace, next: &Workspace) -> String {
 /* ---------------- Workspace ---------------- */
 
 const WORKSPACE_COLS: &str = "business_name, owner_name, email, address, currency, default_rate, invoice_prefix, terms_days, tax_rate, \
-     tax_label, payment_info, invoice_note, auto_approve, team, members, rounding, locked_through, screenshot_minutes";
+     tax_label, payment_info, invoice_note, auto_approve, team, members, rounding, locked_through, screenshot_minutes, \
+     reminders_on, reminder_days";
 
 /// Loads the workspace, creating it with defaults on first use.
 pub async fn workspace(c: &mut PgConnection, ws: &str) -> sqlx::Result<Workspace> {
@@ -214,14 +215,16 @@ pub async fn workspace(c: &mut PgConnection, ws: &str) -> sqlx::Result<Workspace
 pub async fn save_workspace(c: &mut PgConnection, ws: &str, w: &Workspace) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO workspaces (id, business_name, owner_name, email, address, currency, default_rate, invoice_prefix, terms_days, \
-           tax_rate, tax_label, payment_info, invoice_note, auto_approve, team, members, rounding, locked_through, screenshot_minutes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+           tax_rate, tax_label, payment_info, invoice_note, auto_approve, team, members, rounding, locked_through, screenshot_minutes,
+           reminders_on, reminder_days)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
          ON CONFLICT (id) DO UPDATE SET business_name = EXCLUDED.business_name, owner_name = EXCLUDED.owner_name,
            email = EXCLUDED.email, address = EXCLUDED.address, currency = EXCLUDED.currency, default_rate = EXCLUDED.default_rate,
            invoice_prefix = EXCLUDED.invoice_prefix, terms_days = EXCLUDED.terms_days, tax_rate = EXCLUDED.tax_rate,
            tax_label = EXCLUDED.tax_label, payment_info = EXCLUDED.payment_info, invoice_note = EXCLUDED.invoice_note,
            auto_approve = EXCLUDED.auto_approve, team = EXCLUDED.team, members = EXCLUDED.members, rounding = EXCLUDED.rounding,
-           locked_through = EXCLUDED.locked_through, screenshot_minutes = EXCLUDED.screenshot_minutes, updated_at = now()",
+           locked_through = EXCLUDED.locked_through, screenshot_minutes = EXCLUDED.screenshot_minutes,
+           reminders_on = EXCLUDED.reminders_on, reminder_days = EXCLUDED.reminder_days, updated_at = now()",
     )
     .bind(ws)
     .bind(&w.business_name)
@@ -242,6 +245,8 @@ pub async fn save_workspace(c: &mut PgConnection, ws: &str, w: &Workspace) -> sq
     .bind(&w.rounding)
     .bind(&w.locked_through)
     .bind(w.screenshot_minutes)
+    .bind(w.reminders_on)
+    .bind(&w.reminder_days)
     .execute(c)
     .await?;
     Ok(())
@@ -264,12 +269,12 @@ impl Entity for Client {
     }
     async fn upsert<'a>(&'a self, c: &'a mut PgConnection, ws: &'a str) -> sqlx::Result<()> {
         sqlx::query(
-            "INSERT INTO clients (workspace_id, id, name, color, logo, contact, email, address, billing, rate, retainer_fee, included_hours, cap, active, created_ms, sample)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            "INSERT INTO clients (workspace_id, id, name, color, logo, contact, email, address, billing, rate, retainer_fee, included_hours, cap, active, created_ms, sample, reminders)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
              ON CONFLICT (workspace_id, id) DO UPDATE SET name = EXCLUDED.name, color = EXCLUDED.color, logo = EXCLUDED.logo, contact = EXCLUDED.contact,
                email = EXCLUDED.email, address = EXCLUDED.address, billing = EXCLUDED.billing, rate = EXCLUDED.rate,
                retainer_fee = EXCLUDED.retainer_fee, included_hours = EXCLUDED.included_hours, cap = EXCLUDED.cap,
-               active = EXCLUDED.active, sample = EXCLUDED.sample, updated_at = now()",
+               active = EXCLUDED.active, sample = EXCLUDED.sample, reminders = EXCLUDED.reminders, updated_at = now()",
         )
         .bind(ws)
         .bind(&self.id)
@@ -287,6 +292,7 @@ impl Entity for Client {
         .bind(self.active)
         .bind(self.created_at)
         .bind(self.sample)
+        .bind(self.reminders)
         .execute(c)
         .await?;
         Ok(())

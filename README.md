@@ -65,6 +65,7 @@ Then set `DATABASE_URL=postgres://<your-mac-username>@localhost:5432/taskx`.
 | `SMTP_USER` / `SMTP_PASSWORD` | empty | Instead of `SMTP_URL`: a login, no URL-encoding needed. Gmail: your address and a 16-letter [app password](https://myaccount.google.com/apppasswords) |
 | `SMTP_HOST` | `smtp.gmail.com` | With `SMTP_USER`: `host` (TLS on 465), `host:port`, or `host:587` (STARTTLS) |
 | `MAIL_FROM` | `TaskX <SMTP_USER>`, else `TaskX <no-reply@localhost>` | Sender of all emails. With Gmail it must be your Gmail address (or a verified alias) |
+| `CRON_SECRET` | empty | Bearer token for `POST /api/cron/reminders`, so a scheduler (the `reminders.yml` GitHub workflow) can wake the server and send reminders. Empty: that endpoint is off; reminders still run every 30 min while the server is awake |
 | `SCREENSHOT_DIR` | `./storage/screenshots` | Where timer screenshots are written (git-ignored) |
 | `RUST_LOG` | `taskx_backend=info,tower_http=info` | Log level |
 
@@ -98,6 +99,9 @@ Every body is JSON in the frontend's shapes, which are defined in `taskx-fronten
 | GET | `/api/{collection}` | List one collection |
 | GET / PUT / PATCH / DELETE | `/api/{collection}/{id}` | Read, create-or-replace, merge fields, or delete one record |
 | GET | `/api/invoices/{id}/pdf` | The invoice as a PDF |
+| GET | `/api/invoices/{id}/reminders` | Reminders sent, the next scheduled date, and a ready-made draft |
+| POST | `/api/invoices/{id}/remind` | `{ to, subject?, body?, copyMe? }`: emails a reminder now with the PDF. `409` if nothing is owed |
+| POST | `/api/cron/reminders` | `Authorization: Bearer $CRON_SECRET`: sends the reminders due today → `{ sent, failed }` |
 | POST | `/api/invoices/{id}/send` | `{ to, subject?, body?, copyMe?, sentAt? }`: emails the invoice with the PDF attached and marks it sent → the invoice. `409` if email isn't set up or the invoice is void, `502` if the mail server refuses |
 | POST | `/api/screenshots?user=&client=&project=&takenAt=` | Save one timer screenshot (`image/jpeg`, `png` or `webp` body, 8 MB max) |
 
@@ -192,6 +196,7 @@ src/team.rs                Workspaces, members, roles, invites
 src/mail.rs                SMTP / log / in-memory mailers, attachments
 src/pdf.rs                 Invoice PDFs (no dependencies)
 src/invoices.rs            PDF download, send invoice by email
+src/reminders.rs           Payment reminders: schedule, job, send by hand
 src/lib.rs                 Router + middleware (CORS, body limits, tracing)
 src/routes.rs              Handlers; `Ws` extractor = the signed-in user's workspace
 src/db.rs                  `Entity` trait: SQL and business rules per table

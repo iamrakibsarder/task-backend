@@ -18,6 +18,8 @@ pub struct Config {
     /// Built from `SMTP_USER` + `SMTP_PASSWORD` (+ `SMTP_HOST`, default Gmail) when not set.
     pub smtp_url: String,
     pub mail_from: String,
+    /// Bearer token for `POST /api/cron/reminders`. Empty = endpoint off.
+    pub cron_secret: String,
     /// Folder for timer screenshots.
     pub screenshot_dir: String,
 }
@@ -68,6 +70,7 @@ impl Config {
                     user.contains('@').then(|| format!("TaskX <{user}>"))
                 })
                 .unwrap_or_else(|| "TaskX <no-reply@localhost>".into()),
+            cron_secret: var("CRON_SECRET"),
             screenshot_dir: env::var("SCREENSHOT_DIR")
                 .unwrap_or_else(|_| "./storage/screenshots".into()),
         })
