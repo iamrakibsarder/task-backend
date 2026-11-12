@@ -1,0 +1,33 @@
+[package]
+name = "taskx-backend"
+version = "0.1.0"
+edition = "2021"
+description = "TaskX API: time tracking, review and client invoicing"
+publish = false
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "macros",
+  "migrate",
+  "chrono",
+  "json",
+  "rust_decimal",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+rust_decimal = { version = "1", features = ["serde-float"] }
+thiserror = "2"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
