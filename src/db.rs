@@ -185,6 +185,14 @@ pub fn describe_settings(prev: &Workspace, next: &Workspace) -> String {
     if prev.business_name != next.business_name {
         changed.push("business name".into());
     }
+    if prev.reminders_on != next.reminders_on {
+        changed.push(format!(
+            "payment reminders {}",
+            if next.reminders_on { "on" } else { "off" }
+        ));
+    } else if prev.reminder_days != next.reminder_days {
+        changed.push("reminder days".into());
+    }
     if changed.is_empty() {
         "Settings updated".into()
     } else {
