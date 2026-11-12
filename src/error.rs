@@ -24,6 +24,9 @@ pub enum ApiError {
     Forbidden(String),
     #[error("{0}")]
     TooMany(String),
+    /// Another service (the mail server) failed.
+    #[error("{0}")]
+    Upstream(String),
     #[error("Database error")]
     Db(#[from] sqlx::Error),
 }
@@ -48,6 +51,7 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m.clone()),
             ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
             ApiError::TooMany(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
+            ApiError::Upstream(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             ApiError::Db(e) => db_error(e),
         };
         (status, Json(json!({ "error": msg }))).into_response()

@@ -101,6 +101,8 @@ pub fn api() -> Router<AppState> {
         )
         .route("/api/invites/{token}", get(team::invite_info))
         .route("/api/invites/{token}/accept", post(team::accept_invite))
+        .route("/api/invoices/{id}/pdf", get(crate::invoices::pdf))
+        .route("/api/invoices/{id}/send", post(crate::invoices::send))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/import", post(import))
         .route("/api/workspace", get(get_workspace).put(put_workspace))

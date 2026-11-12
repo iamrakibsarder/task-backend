@@ -519,7 +519,9 @@ pub async fn logout(State(st): State<AppState>, headers: HeaderMap) -> ApiResult
 /// `GET /api/auth/me`: `{ authRequired, user }`. 401 when accounts are on and the token is bad.
 pub async fn me(State(st): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     if !st.auth_required {
-        return Ok(Json(json!({ "authRequired": false, "user": null })));
+        return Ok(Json(
+            json!({ "authRequired": false, "user": null, "mailEnabled": st.mailer.delivers() }),
+        ));
     }
     let user = current(&st, &headers).await?;
     Ok(Json(
@@ -635,6 +637,7 @@ pub async fn forgot(
                 "Hi {},\n\nSomeone asked to reset the password for your TaskX account. If it was you, open this link within an hour:\n\n{link}\n\nIf it wasn't you, ignore this email. Your password stays the same.\n",
                 if name.is_empty() { "there" } else { &name }
             ),
+            ..Default::default()
         },
     );
     Ok(StatusCode::NO_CONTENT)

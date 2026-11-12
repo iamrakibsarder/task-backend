@@ -354,6 +354,7 @@ pub async fn create_invite(
                 if b.role == "admin" { "an" } else { "a" },
                 b.role
             ),
+            ..Default::default()
         },
     );
     Ok(Json(json!({

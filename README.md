@@ -95,6 +95,8 @@ Every body is JSON in the frontend's shapes, which are defined in `taskx-fronten
 | GET / PUT | `/api/workspace` | Read or replace the business settings |
 | GET | `/api/{collection}` | List one collection |
 | GET / PUT / PATCH / DELETE | `/api/{collection}/{id}` | Read, create-or-replace, merge fields, or delete one record |
+| GET | `/api/invoices/{id}/pdf` | The invoice as a PDF |
+| POST | `/api/invoices/{id}/send` | `{ to, subject?, body?, copyMe?, sentAt? }`: emails the invoice with the PDF attached and marks it sent → the invoice. `409` if email isn't set up or the invoice is void, `502` if the mail server refuses |
 | POST | `/api/screenshots?user=&client=&project=&takenAt=` | Save one timer screenshot (`image/jpeg`, `png` or `webp` body, 8 MB max) |
 
 `collection` is one of `clients`, `projects`, `tasks`, `invoices` or `expenses`.
@@ -185,7 +187,9 @@ migrations/0004_…sql       Memberships, invites, password resets
 src/main.rs                Config, database pool, migrations, server
 src/auth.rs                Accounts, sessions, password hashing, sign-in limits, reset
 src/team.rs                Workspaces, members, roles, invites
-src/mail.rs                SMTP / log / in-memory mailers
+src/mail.rs                SMTP / log / in-memory mailers, attachments
+src/pdf.rs                 Invoice PDFs (no dependencies)
+src/invoices.rs            PDF download, send invoice by email
 src/lib.rs                 Router + middleware (CORS, body limits, tracing)
 src/routes.rs              Handlers; `Ws` extractor = the signed-in user's workspace
 src/db.rs                  `Entity` trait: SQL and business rules per table
@@ -197,6 +201,5 @@ tests/api.rs               API tests
 
 ## Next
 
-- **Email from the server:** send invoices with a PDF attached.
 - **Stripe** payment links on invoices.
 - **Google Drive** storage for screenshots.

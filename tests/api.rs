@@ -88,6 +88,30 @@ impl T {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
     }
+    /// A GET that returns the raw body and content type (for files).
+    async fn get_raw(&self, path: &str) -> (StatusCode, String, Vec<u8>) {
+        let mut req = Request::builder().method(Method::GET).uri(path);
+        if let Some(tok) = &self.token {
+            req = req.header("authorization", format!("Bearer {tok}"));
+        }
+        let res = self
+            .app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let ct = res
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (
+            status,
+            ct,
+            res.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        )
+    }
     async fn put(&self, path: &str, body: Value) -> (StatusCode, Value) {
         self.call(Method::PUT, path, Some(body)).await
     }
@@ -1064,5 +1088,111 @@ async fn password_reset_by_email_link() {
         .await
         .0,
         StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+/* ---------------- Invoice PDF & email ---------------- */
+
+#[tokio::test]
+async fn invoices_download_as_pdf_and_send_by_email() {
+    let Some(t) = setup("invoice-mail").await else {
+        return;
+    };
+    t.seed().await;
+    let (_, mut w) = t.call(Method::GET, "/api/workspace", None).await;
+    w["businessName"] = json!("Northwind Studio");
+    w["email"] = json!("hello@northwind.test");
+    w["paymentInfo"] = json!("IBAN DE00 1234");
+    assert_eq!(t.put("/api/workspace", w).await.0, StatusCode::OK);
+    assert_eq!(t.put("/api/invoices/i1", invoice()).await.0, StatusCode::OK);
+
+    // PDF download.
+    let (s, ct, pdf) = t.get_raw("/api/invoices/i1/pdf").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(ct, "application/pdf");
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    if let Ok(dir) = std::env::var("PDF_OUT") {
+        std::fs::write(format!("{dir}/invoice.pdf"), &pdf).unwrap();
+    }
+    assert_eq!(
+        t.get_raw("/api/invoices/nope/pdf").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Bad input is refused and nothing is sent.
+    assert_eq!(
+        t.post("/api/invoices/i1/send", json!({"to": "not an email"}))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        t.post(
+            "/api/invoices/i1/send",
+            json!({"to": "x@y.co", "subject": "two\nlines"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(t.mail.sent.lock().unwrap().is_empty());
+
+    // Send: the draft becomes sent, with the PDF attached and replies going to the business.
+    let (s, v) = t
+        .post(
+            "/api/invoices/i1/send",
+            json!({"to": "Billing@Client.test", "subject": "Your invoice", "body": "Hi there", "sentAt": "2026-11-02"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "sent");
+    assert_eq!(v["sentAt"], "2026-11-02");
+    assert_eq!(v["client"]["email"], "billing@client.test");
+    assert_eq!(v["from"]["businessName"], "Northwind Studio");
+    let mail = t.email_to("billing@client.test").await.expect("email sent");
+    assert_eq!(mail.subject, "Your invoice");
+    assert_eq!(mail.body, "Hi there");
+    assert_eq!(mail.reply_to.as_deref(), Some("hello@northwind.test"));
+    assert_eq!(mail.from_name.as_deref(), Some("Northwind Studio"));
+    assert_eq!(mail.attachments.len(), 1);
+    assert_eq!(mail.attachments[0].filename, "INV-0001 Northwind.pdf");
+    assert!(mail.attachments[0].bytes.starts_with(b"%PDF"));
+    let (_, act) = t.call(Method::GET, "/api/activity?limit=1", None).await;
+    assert_eq!(
+        act[0]["summary"],
+        "INV-0001 emailed to billing@client.test (now sent)"
+    );
+
+    // Resending without a message uses the default one, and keeps the status.
+    t.mail.sent.lock().unwrap().clear();
+    let (s, v) = t
+        .post(
+            "/api/invoices/i1/send",
+            json!({"to": "billing@client.test"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["status"], "sent");
+    let mail = t.email_to("billing@client.test").await.unwrap();
+    assert!(
+        mail.subject
+            .starts_with("Invoice INV-0001 from Northwind Studio"),
+        "{}",
+        mail.subject
+    );
+    assert!(mail.body.contains("IBAN DE00 1234"));
+
+    // Void invoices can't be sent.
+    let mut voided = v.clone();
+    voided["status"] = json!("void");
+    assert_eq!(t.put("/api/invoices/i1", voided).await.0, StatusCode::OK);
+    assert_eq!(
+        t.post(
+            "/api/invoices/i1/send",
+            json!({"to": "billing@client.test"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
     );
 }
