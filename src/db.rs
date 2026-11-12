@@ -25,6 +25,9 @@ pub trait Entity:
         ws: &'a str,
     ) -> impl Future<Output = sqlx::Result<()>> + Send + 'a;
 
+    /// One line for the activity log. `prev = None` for a create (or, on delete, the old record as `next`).
+    fn describe(prev: Option<&Self>, next: &Self) -> String;
+
     /// Business rules for a create (`prev = None`) or update.
     fn check_write(_prev: Option<&Self>, _next: &Self, _w: &Workspace) -> ApiResult<()> {
         Ok(())
@@ -87,6 +90,106 @@ pub async fn delete<T: Entity>(c: &mut PgConnection, ws: &str, id: &str) -> sqlx
     .execute(c)
     .await?;
     Ok(())
+}
+
+/* ---------------- Activity log ---------------- */
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityEntry {
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub actor: String,
+    pub action: String,
+    pub entity: String,
+    pub entity_id: String,
+    pub summary: String,
+}
+
+pub async fn log(
+    c: &mut PgConnection,
+    ws: &str,
+    actor: &str,
+    action: &str,
+    entity: &str,
+    entity_id: &str,
+    summary: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO activity (workspace_id, actor, action, entity, entity_id, summary) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(ws)
+    .bind(actor)
+    .bind(action)
+    .bind(entity)
+    .bind(entity_id)
+    .bind(clip(summary, 300))
+    .execute(c)
+    .await?;
+    Ok(())
+}
+
+pub async fn activity(
+    c: &mut PgConnection,
+    ws: &str,
+    limit: i64,
+    before: Option<i64>,
+) -> sqlx::Result<Vec<ActivityEntry>> {
+    sqlx::query_as::<_, ActivityEntry>(
+        "SELECT id, at, actor, action, entity, entity_id, summary FROM activity
+         WHERE workspace_id = $1 AND ($2::BIGINT IS NULL OR id < $2)
+         ORDER BY id DESC LIMIT $3",
+    )
+    .bind(ws)
+    .bind(before)
+    .bind(limit)
+    .fetch_all(c)
+    .await
+}
+
+fn clip(s: &str, n: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n - 1).collect::<String>())
+    }
+}
+
+/// "Status review → billable" when the status moved, else the fallback.
+fn status_change(prev: Option<&str>, next: &str, fallback: String) -> String {
+    match prev {
+        Some(p) if p != next => format!("{fallback} · {p} → {next}"),
+        _ => fallback,
+    }
+}
+
+pub fn describe_settings(prev: &Workspace, next: &Workspace) -> String {
+    let mut changed = Vec::new();
+    if prev.locked_through != next.locked_through {
+        changed.push(if next.locked_through.is_empty() {
+            "unlocked all months".to_string()
+        } else {
+            format!("locked through {}", next.locked_through)
+        });
+    }
+    if prev.default_rate != next.default_rate {
+        changed.push(format!("default rate {}", next.default_rate));
+    }
+    if prev.tax_rate != next.tax_rate {
+        changed.push(format!("tax {}%", next.tax_rate));
+    }
+    if prev.currency != next.currency {
+        changed.push(format!("currency {}", next.currency));
+    }
+    if prev.business_name != next.business_name {
+        changed.push("business name".into());
+    }
+    if changed.is_empty() {
+        "Settings updated".into()
+    } else {
+        format!("Settings: {}", changed.join(", "))
+    }
 }
 
 /* ---------------- Workspace ---------------- */
@@ -156,6 +259,9 @@ impl Entity for Client {
     fn validate(&self) -> ApiResult<()> {
         Client::validate(self)
     }
+    fn describe(_prev: Option<&Self>, next: &Self) -> String {
+        format!("Client {}", next.name)
+    }
     async fn upsert<'a>(&'a self, c: &'a mut PgConnection, ws: &'a str) -> sqlx::Result<()> {
         sqlx::query(
             "INSERT INTO clients (workspace_id, id, name, color, logo, contact, email, address, billing, rate, retainer_fee, included_hours, cap, active, created_ms, sample)
@@ -219,6 +325,12 @@ impl Entity for Project {
     }
     fn validate(&self) -> ApiResult<()> {
         Project::validate(self)
+    }
+    fn describe(prev: Option<&Self>, next: &Self) -> String {
+        match prev {
+            Some(p) if !p.archived && next.archived => format!("Project {} archived", next.name),
+            _ => format!("Project {}", next.name),
+        }
     }
     async fn upsert<'a>(&'a self, c: &'a mut PgConnection, ws: &'a str) -> sqlx::Result<()> {
         let client = if self.internal {
@@ -286,6 +398,14 @@ impl Entity for Task {
     }
     fn validate(&self) -> ApiResult<()> {
         Task::validate(self)
+    }
+    fn describe(prev: Option<&Self>, next: &Self) -> String {
+        let hours = f64::from(next.minutes) / 60.0;
+        status_change(
+            prev.map(|p| p.status.as_str()),
+            &next.status,
+            format!("{} ({hours:.2}h, {})", clip(&next.memo, 80), next.date),
+        )
     }
     async fn upsert<'a>(&'a self, c: &'a mut PgConnection, ws: &'a str) -> sqlx::Result<()> {
         sqlx::query(
@@ -361,17 +481,33 @@ impl Entity for Invoice {
     fn validate(&self) -> ApiResult<()> {
         Invoice::validate(self)
     }
+    fn describe(prev: Option<&Self>, next: &Self) -> String {
+        let paid_before = prev.map_or(0, |p| p.payments.len());
+        if next.payments.len() > paid_before {
+            if let Some(pay) = next.payments.last() {
+                return format!(
+                    "Invoice {} · payment {:.2} {}",
+                    next.number, pay.amount, next.currency
+                );
+            }
+        }
+        status_change(
+            prev.map(|p| p.status.as_str()),
+            &next.status,
+            format!("Invoice {} for {}", next.number, next.client.name),
+        )
+    }
     async fn upsert<'a>(&'a self, c: &'a mut PgConnection, ws: &'a str) -> sqlx::Result<()> {
         sqlx::query(
             "INSERT INTO invoices (workspace_id, id, seq, number, client_id, client, sender, period, issue_date, due_date, currency, lines,
-               discount, tax_rate, tax_label, notes, status, sent_at, paid_at, paid_note, credits, created_ms, sample)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+               discount, tax_rate, tax_label, notes, status, sent_at, paid_at, paid_note, credits, created_ms, sample, payments)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
              ON CONFLICT (workspace_id, id) DO UPDATE SET seq = EXCLUDED.seq, number = EXCLUDED.number, client_id = EXCLUDED.client_id,
                client = EXCLUDED.client, sender = EXCLUDED.sender, period = EXCLUDED.period, issue_date = EXCLUDED.issue_date,
                due_date = EXCLUDED.due_date, currency = EXCLUDED.currency, lines = EXCLUDED.lines, discount = EXCLUDED.discount,
                tax_rate = EXCLUDED.tax_rate, tax_label = EXCLUDED.tax_label, notes = EXCLUDED.notes, status = EXCLUDED.status,
                sent_at = EXCLUDED.sent_at, paid_at = EXCLUDED.paid_at, paid_note = EXCLUDED.paid_note, credits = EXCLUDED.credits,
-               sample = EXCLUDED.sample, updated_at = now()",
+               sample = EXCLUDED.sample, payments = EXCLUDED.payments, updated_at = now()",
         )
         .bind(ws)
         .bind(&self.id)
@@ -396,6 +532,7 @@ impl Entity for Invoice {
         .bind(&self.credits)
         .bind(self.created_at)
         .bind(self.sample)
+        .bind(&self.payments)
         .execute(c)
         .await?;
         Ok(())
@@ -462,6 +599,9 @@ impl Entity for Expense {
     }
     fn validate(&self) -> ApiResult<()> {
         Expense::validate(self)
+    }
+    fn describe(_prev: Option<&Self>, next: &Self) -> String {
+        format!("Expense {} ({})", clip(&next.desc, 80), next.amount)
     }
     async fn upsert<'a>(&'a self, c: &'a mut PgConnection, ws: &'a str) -> sqlx::Result<()> {
         sqlx::query(

@@ -34,6 +34,8 @@ async fn main() {
         AppState {
             db,
             workspace_id: cfg.workspace_id.clone(),
+            auth_required: cfg.auth_required,
+            limiter: Arc::new(taskx_backend::auth::LoginLimiter::default()),
             screenshots,
         },
         &cfg.cors_origins,
@@ -46,8 +48,12 @@ async fn main() {
             std::process::exit(1)
         });
     tracing::info!(
-        "TaskX API on http://{addr} (workspace '{}', CORS {:?}, screenshots in {})",
-        cfg.workspace_id,
+        "TaskX API on http://{addr} ({}, CORS {:?}, screenshots in {})",
+        if cfg.auth_required {
+            "accounts on".to_string()
+        } else {
+            format!("accounts off, workspace '{}'", cfg.workspace_id)
+        },
         cfg.cors_origins,
         cfg.screenshot_dir
     );

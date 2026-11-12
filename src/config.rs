@@ -9,6 +9,9 @@ pub struct Config {
     /// Browser origins allowed to call the API, e.g. the Vite dev server.
     pub cors_origins: Vec<String>,
     pub workspace_id: String,
+    /// Accounts on (default): every request needs a signed-in user, and each user has their own
+    /// workspace. `AUTH=off` = single-business mode, everything goes to `workspace_id`.
+    pub auth_required: bool,
     /// Folder for timer screenshots.
     pub screenshot_dir: String,
 }
@@ -33,6 +36,14 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
             workspace_id: env::var("WORKSPACE_ID").unwrap_or_else(|_| "default".into()),
+            auth_required: !matches!(
+                env::var("AUTH")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "off" | "false" | "0" | "no"
+            ),
             screenshot_dir: env::var("SCREENSHOT_DIR")
                 .unwrap_or_else(|_| "./storage/screenshots".into()),
         })

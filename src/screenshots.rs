@@ -133,7 +133,7 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub async fn upload(
     State(state): State<AppState>,
-    Ws(ws): Ws,
+    ws: Ws,
     Query(q): Query<ShotQuery>,
     headers: HeaderMap,
     body: Bytes,
@@ -163,7 +163,7 @@ pub async fn upload(
     let parts = relative_path(&q.user, &q.client, &q.project, at, ext);
     let path = state
         .screenshots
-        .save(&ws, &parts, &body)
+        .save(&ws.id, &parts, &body)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "saving screenshot failed");

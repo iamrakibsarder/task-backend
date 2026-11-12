@@ -319,6 +319,20 @@ pub struct CreditNote {
     pub reason: String,
 }
 
+/// Money received against an invoice. Several partial payments can add up to the total.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Payment {
+    pub id: String,
+    pub date: NaiveDate,
+    pub amount: f64,
+    /// Bank transfer, card, cash…
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoice {
@@ -352,6 +366,8 @@ pub struct Invoice {
     pub paid_note: Option<String>,
     #[serde(default = "empty")]
     pub credits: Json<Vec<CreditNote>>,
+    #[serde(default = "empty")]
+    pub payments: Json<Vec<Payment>>,
     #[serde(default)]
     #[sqlx(rename = "created_ms")]
     pub created_at: i64,
@@ -392,7 +408,34 @@ impl Invoice {
                 return Err(ApiError::bad("Credit notes must be above zero."));
             }
         }
+        for p in self.payments.iter() {
+            if !p.amount.is_finite() || p.amount <= 0.0 {
+                return Err(ApiError::bad("Payments must be above zero."));
+            }
+        }
+        if !self.payments.is_empty() && self.status == "draft" {
+            return Err(ApiError::bad("Send the invoice before recording payments."));
+        }
+        let settled: f64 = self.credits.iter().map(|c| c.amount).sum::<f64>()
+            + self.payments.iter().map(|p| p.amount).sum::<f64>();
+        if settled > self.total() + 0.005 {
+            return Err(ApiError::bad(format!(
+                "Payments and credits ({settled:.2}) can't be more than the invoice total ({:.2}).",
+                self.total()
+            )));
+        }
         Ok(())
+    }
+
+    /// Total after discount and tax, the same way the app computes it.
+    pub fn total(&self) -> f64 {
+        use rust_decimal::prelude::ToPrimitive;
+        let r2 = |x: f64| (x * 100.0).round() / 100.0;
+        let subtotal = r2(self.lines.iter().map(|l| l.amount).sum());
+        let discount = r2(self.discount.to_f64().unwrap_or(0.0));
+        let taxable = (subtotal - discount).max(0.0);
+        let tax = r2(taxable * self.tax_rate.to_f64().unwrap_or(0.0) / 100.0);
+        r2(taxable + tax)
     }
 }
 

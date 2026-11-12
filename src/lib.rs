@@ -1,5 +1,6 @@
 //! TaskX API. See README.md for the endpoint list.
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
