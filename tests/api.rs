@@ -11,13 +11,21 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use taskx_backend::{app, auth::LoginLimiter, connect, screenshots::DiskStore, AppState, MIGRATOR};
+use taskx_backend::{
+    app,
+    auth::LoginLimiter,
+    connect,
+    mail::{token_after, MemoryMailer},
+    screenshots::DiskStore,
+    AppState, MIGRATOR,
+};
 use tower::ServiceExt;
 
 struct T {
     app: Router,
     shots: std::path::PathBuf,
     token: Option<String>,
+    mail: Arc<MemoryMailer>,
 }
 
 async fn setup(name: &str) -> Option<T> {
@@ -40,7 +48,10 @@ async fn setup_with(name: &str, auth: bool) -> Option<T> {
         .unwrap();
     let shots = std::env::temp_dir().join(format!("taskx-shots-{ws}"));
     let _ = std::fs::remove_dir_all(&shots);
+    let mail = Arc::new(MemoryMailer::default());
     let state = AppState {
+        mailer: mail.clone(),
+        app_url: "http://app.test".into(),
         db,
         workspace_id: ws,
         auth_required: auth,
@@ -53,6 +64,7 @@ async fn setup_with(name: &str, auth: bool) -> Option<T> {
         app: app(state, &["http://localhost:5173".into()]),
         shots,
         token: None,
+        mail,
     })
 }
 
@@ -81,6 +93,34 @@ impl T {
     }
     async fn patch(&self, path: &str, body: Value) -> (StatusCode, Value) {
         self.call(Method::PATCH, path, Some(body)).await
+    }
+    /// The newest email to `to`, waiting briefly because mail is sent in the background.
+    async fn email_to(&self, to: &str) -> Option<taskx_backend::mail::Email> {
+        for _ in 0..50 {
+            if let Some(e) = self.mail.last_to(to) {
+                return Some(e);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        None
+    }
+    async fn signup(
+        &mut self,
+        email: &str,
+        name: &str,
+        invite: Option<&str>,
+    ) -> (StatusCode, Value) {
+        self.token = None;
+        let (s, v) = self
+            .post(
+                "/api/auth/signup",
+                json!({"email": email, "password": "long enough", "name": name, "invite": invite}),
+            )
+            .await;
+        if s == StatusCode::OK {
+            self.token = Some(v["token"].as_str().unwrap().to_string());
+        }
+        (s, v)
     }
     async fn post(&self, path: &str, body: Value) -> (StatusCode, Value) {
         self.call(Method::POST, path, Some(body)).await
@@ -705,4 +745,324 @@ async fn changes_are_recorded_in_the_activity_log() {
         .call(Method::GET, &format!("/api/activity?before={before}"), None)
         .await;
     assert_eq!(older.as_array().unwrap().len(), 2);
+}
+
+/* ---------------- Teams ---------------- */
+
+#[tokio::test]
+async fn teams_invite_roles_and_removal() {
+    let Some(mut t) = setup_with("teams", true).await else {
+        return;
+    };
+    let (owner, mate, other) = (email("t-owner"), email("t-mate"), email("t-other"));
+    for m in [&owner, &mate, &other] {
+        sqlx_cleanup(m).await;
+    }
+    t.signup(&owner, "Olive", None).await;
+    let owner_tok = t.token.clone().unwrap();
+    let (_, me) = t.call(Method::GET, "/api/auth/me", None).await;
+    assert_eq!(me["user"]["role"], "owner");
+    let owner_id = me["user"]["id"].as_str().unwrap().to_string();
+    t.seed().await;
+
+    // Invite: link returned to the sender and emailed to the invitee.
+    let (s, v) = t
+        .post(
+            "/api/team/invites",
+            json!({"email": mate.to_uppercase(), "role": "member"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let link = v["link"].as_str().unwrap().to_string();
+    assert!(link.starts_with("http://app.test/invite/"));
+    let mail = t.email_to(&mate).await.expect("invite email");
+    assert!(mail.body.contains(&link));
+    let token = link.rsplit('/').next().unwrap().to_string();
+    assert_eq!(
+        t.post(
+            "/api/team/invites",
+            json!({"email": owner, "role": "member"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+        "already a member"
+    );
+    assert_eq!(
+        t.post(
+            "/api/team/invites",
+            json!({"email": "x@y.co", "role": "owner"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "owners aren't invited"
+    );
+
+    // Anyone with the link can see what it's for.
+    t.token = None;
+    let (s, info) = t
+        .call(Method::GET, &format!("/api/invites/{token}"), None)
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(info["email"], mate);
+    assert_eq!(info["invitedBy"], "Olive");
+    assert_eq!(info["hasAccount"], false);
+
+    // Signing up with the wrong email doesn't use the invite.
+    assert_eq!(
+        t.signup(&other, "Oscar", Some(&token)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    // The right one joins the team directly.
+    let (s, _) = t.signup(&mate, "Max", Some(&token)).await;
+    assert_eq!(s, StatusCode::OK);
+    let mate_tok = t.token.clone().unwrap();
+    let (_, me) = t.call(Method::GET, "/api/auth/me", None).await;
+    assert_eq!(me["user"]["role"], "member");
+    let mate_id = me["user"]["id"].as_str().unwrap().to_string();
+    let (_, data) = t.call(Method::GET, "/api/bootstrap", None).await;
+    assert_eq!(
+        data["tasks"].as_array().unwrap().len(),
+        1,
+        "sees the team's tasks"
+    );
+    assert_eq!(
+        t.call(Method::GET, &format!("/api/invites/{token}"), None)
+            .await
+            .0,
+        StatusCode::CONFLICT,
+        "used"
+    );
+
+    // Members work with data but can't change settings or invite.
+    assert_eq!(
+        t.put("/api/tasks/m1", task("m1", "2026-11-03", 30)).await.0,
+        StatusCode::OK
+    );
+    let (_, w) = t.call(Method::GET, "/api/workspace", None).await;
+    assert_eq!(t.put("/api/workspace", w).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        t.post("/api/team/invites", json!({"email": other})).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, act) = t.call(Method::GET, "/api/activity?limit=1", None).await;
+    assert_eq!(act[0]["actor"], "Max", "the log says who did it");
+
+    // The owner promotes them; now they can invite.
+    t.token = Some(owner_tok.clone());
+    assert_eq!(
+        t.patch(
+            &format!("/api/team/members/{mate_id}"),
+            json!({"role": "admin"})
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    t.token = Some(mate_tok.clone());
+    let (s, v) = t
+        .post(
+            "/api/team/invites",
+            json!({"email": other, "role": "member"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let other_token = v["link"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        t.patch(
+            &format!("/api/team/members/{owner_id}"),
+            json!({"role": "member"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "only owners change roles"
+    );
+    assert_eq!(
+        t.del(&format!("/api/team/members/{owner_id}")).await,
+        StatusCode::FORBIDDEN
+    );
+
+    // Someone with their own account accepts; they now belong to two workspaces.
+    t.signup(&other, "Oscar", None).await;
+    let other_tok = t.token.clone().unwrap();
+    let (_, mine) = t.call(Method::GET, "/api/auth/me", None).await;
+    let own_ws = mine["user"]["workspaceId"].as_str().unwrap().to_string();
+    t.token = Some(mate_tok.clone());
+    assert_eq!(
+        t.call(
+            Method::POST,
+            &format!("/api/invites/{other_token}/accept"),
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "invite is for someone else"
+    );
+    t.token = Some(other_tok.clone());
+    assert_eq!(
+        t.call(
+            Method::POST,
+            &format!("/api/invites/{other_token}/accept"),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, list) = t.call(Method::GET, "/api/workspaces", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let (_, team) = t.call(Method::GET, "/api/team", None).await;
+    assert_eq!(team["members"].as_array().unwrap().len(), 3);
+    assert_eq!(team["invites"], json!([]), "members don't see invites");
+    assert_eq!(
+        t.post("/api/workspaces/switch", json!({"workspaceId": own_ws}))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, data) = t.call(Method::GET, "/api/bootstrap", None).await;
+    assert_eq!(data["tasks"], json!([]));
+    assert_eq!(
+        t.post("/api/workspaces/switch", json!({"workspaceId": "w-nope"}))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A workspace always keeps an owner.
+    t.token = Some(owner_tok.clone());
+    assert_eq!(
+        t.patch(
+            &format!("/api/team/members/{owner_id}"),
+            json!({"role": "admin"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        t.del(&format!("/api/team/members/{owner_id}")).await,
+        StatusCode::CONFLICT
+    );
+
+    // Removed: their next request lands in a fresh workspace of their own.
+    assert_eq!(
+        t.del(&format!("/api/team/members/{mate_id}")).await,
+        StatusCode::NO_CONTENT
+    );
+    t.token = Some(mate_tok);
+    let (s, me) = t.call(Method::GET, "/api/auth/me", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(me["user"]["role"], "owner");
+    let (_, data) = t.call(Method::GET, "/api/bootstrap", None).await;
+    assert_eq!(data["tasks"], json!([]), "no access to the old team's data");
+}
+
+#[tokio::test]
+async fn password_reset_by_email_link() {
+    let Some(mut t) = setup_with("reset", true).await else {
+        return;
+    };
+    let m = email("forgetful");
+    sqlx_cleanup(&m).await;
+    t.signup(&m, "Fern", None).await;
+    let old = t.token.clone();
+    t.token = None;
+
+    // Unknown emails get the same answer and nothing is sent.
+    let nobody = email("nobody-reset");
+    assert_eq!(
+        t.post("/api/auth/forgot", json!({"email": nobody})).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        t.post("/api/auth/forgot", json!({"email": m.to_uppercase()}))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let mail = t.email_to(&m).await.expect("reset email");
+    assert!(t.mail.last_to(&nobody).is_none());
+    assert!(mail.body.contains("http://app.test/reset-password?token="));
+    let token = token_after(&mail.body, "token=").unwrap();
+
+    assert_eq!(
+        t.post(
+            "/api/auth/reset",
+            json!({"token": token, "password": "short"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (s, v) = t
+        .post(
+            "/api/auth/reset",
+            json!({"token": token, "password": "brand new secret"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["token"].is_string(), "signed in straight away");
+    assert_eq!(
+        t.post(
+            "/api/auth/reset",
+            json!({"token": token, "password": "another secret"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "links work once"
+    );
+
+    // Old sessions are gone; the new password works, the old one doesn't.
+    t.token = old;
+    assert_eq!(
+        t.call(Method::GET, "/api/auth/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    t.token = None;
+    assert_eq!(
+        t.post(
+            "/api/auth/login",
+            json!({"email": m, "password": "long enough"})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        t.post(
+            "/api/auth/login",
+            json!({"email": m, "password": "brand new secret"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // A newer link replaces an older one.
+    t.post("/api/auth/forgot", json!({"email": m})).await;
+    let first = token_after(&t.email_to(&m).await.unwrap().body, "token=").unwrap();
+    t.mail.sent.lock().unwrap().clear();
+    t.post("/api/auth/forgot", json!({"email": m})).await;
+    let second = token_after(&t.email_to(&m).await.unwrap().body, "token=").unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        t.post(
+            "/api/auth/reset",
+            json!({"token": first, "password": "third secret!"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
 }

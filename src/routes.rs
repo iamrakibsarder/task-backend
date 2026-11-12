@@ -14,6 +14,7 @@ use crate::auth::{self, LoginLimiter};
 use crate::db::{self, Entity};
 use crate::error::{ApiError, ApiResult};
 use crate::models::*;
+use crate::team;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,9 @@ pub struct AppState {
     /// Accounts on: every `/api` request needs `Authorization: Bearer <token>`.
     pub auth_required: bool,
     pub limiter: Arc<LoginLimiter>,
+    pub mailer: Arc<dyn crate::mail::Mailer>,
+    /// The web app's address, for links in emails.
+    pub app_url: String,
     /// Where timer screenshots go (disk now, Google Drive later).
     pub screenshots: Arc<dyn crate::screenshots::ScreenshotStore>,
 }
@@ -39,6 +43,10 @@ impl FromRef<AppState> for PgPool {
 pub struct Ws {
     pub id: String,
     pub actor: String,
+    /// Empty with accounts off.
+    pub user_id: String,
+    /// `owner`, `admin` or `member` (always `owner` with accounts off).
+    pub role: String,
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for Ws
@@ -52,17 +60,16 @@ where
             return Ok(Ws {
                 id: st.workspace_id,
                 actor: String::new(),
+                user_id: String::new(),
+                role: "owner".into(),
             });
         }
-        let user = auth::current(&st, &parts.headers).await?;
-        let actor = if user.name.is_empty() {
-            user.email
-        } else {
-            user.name
-        };
+        let m = auth::current(&st, &parts.headers).await?;
         Ok(Ws {
-            id: user.workspace_id,
-            actor,
+            actor: m.display_name(),
+            id: m.workspace_id,
+            user_id: m.id,
+            role: m.role,
         })
     }
 }
@@ -75,6 +82,25 @@ pub fn api() -> Router<AppState> {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/password", post(auth::change_password))
+        .route("/api/auth/forgot", post(auth::forgot))
+        .route("/api/auth/reset", post(auth::reset))
+        .route(
+            "/api/workspaces",
+            get(team::list_workspaces).post(team::create_workspace),
+        )
+        .route("/api/workspaces/switch", post(team::switch_workspace))
+        .route("/api/team", get(team::team))
+        .route("/api/team/invites", post(team::create_invite))
+        .route(
+            "/api/team/invites/{id}",
+            axum::routing::delete(team::revoke_invite),
+        )
+        .route(
+            "/api/team/members/{user_id}",
+            axum::routing::patch(team::set_role).delete(team::remove_member),
+        )
+        .route("/api/invites/{token}", get(team::invite_info))
+        .route("/api/invites/{token}/accept", post(team::accept_invite))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/import", post(import))
         .route("/api/workspace", get(get_workspace).put(put_workspace))
@@ -104,6 +130,7 @@ async fn bootstrap(State(db): State<PgPool>, ws: Ws) -> ApiResult<Json<DataState
 
 /// Replaces the whole workspace (restore a backup, or move browser data to the server).
 async fn import(State(db): State<PgPool>, ws: Ws, body: Json<Value>) -> ApiResult<Json<DataState>> {
+    team::require(&ws, "admin")?;
     let data: DataState = parse(body.0)?;
     data.workspace.validate()?;
     data.clients.iter().try_for_each(Client::validate)?;
@@ -147,6 +174,7 @@ async fn put_workspace(
     ws: Ws,
     body: Json<Value>,
 ) -> ApiResult<Json<Workspace>> {
+    team::require(&ws, "admin")?;
     let w: Workspace = parse(body.0)?;
     w.validate()?;
     let mut tx = db.begin().await?;

@@ -19,6 +19,9 @@ pub enum ApiError {
     /// Not signed in, or the session ended.
     #[error("{0}")]
     Unauthorized(String),
+    /// Signed in, but the role doesn't allow it.
+    #[error("{0}")]
+    Forbidden(String),
     #[error("{0}")]
     TooMany(String),
     #[error("Database error")]
@@ -43,6 +46,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m.clone()),
+            ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
             ApiError::TooMany(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             ApiError::Db(e) => db_error(e),
         };

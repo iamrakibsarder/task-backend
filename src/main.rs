@@ -27,6 +27,21 @@ async fn main() {
         std::process::exit(1)
     });
 
+    let mailer: Arc<dyn taskx_backend::mail::Mailer> = if cfg.smtp_url.is_empty() {
+        tracing::warn!(
+            "SMTP_URL is not set: reset and invite emails are written to the log instead of sent"
+        );
+        Arc::new(taskx_backend::mail::LogMailer)
+    } else {
+        Arc::new(
+            taskx_backend::mail::SmtpMailer::new(&cfg.smtp_url, &cfg.mail_from).unwrap_or_else(
+                |e| {
+                    eprintln!("{e}");
+                    std::process::exit(1)
+                },
+            ),
+        )
+    };
     let screenshots = Arc::new(DiskStore {
         root: cfg.screenshot_dir.clone().into(),
     });
@@ -36,6 +51,8 @@ async fn main() {
             workspace_id: cfg.workspace_id.clone(),
             auth_required: cfg.auth_required,
             limiter: Arc::new(taskx_backend::auth::LoginLimiter::default()),
+            mailer,
+            app_url: cfg.app_url.clone(),
             screenshots,
         },
         &cfg.cors_origins,
